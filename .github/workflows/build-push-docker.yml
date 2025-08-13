@@ -1,0 +1,159 @@
+name: Build and Push CCR Docker Image on Upstream Release
+
+on:
+  schedule:
+    # 每小时的第 0 分钟执行一次
+    - cron: '0 * * * *'
+  workflow_dispatch:
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      # 步骤 1: 检出您自己的代码仓库，并获取完整历史
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # 步骤 2: 使用 curl 获取上游仓库的最新提交信息
+      - name: Get latest commit from upstream
+        id: get_upstream_commit
+        run: |
+          commit_data=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/musistudio/claude-code-router/commits/main")
+          commit_message=$(echo "$commit_data" | jq -r '.commit.message')
+          commit_sha=$(echo "$commit_data" | jq -r '.sha')
+          
+          echo "Upstream commit SHA: $commit_sha"
+          echo "Upstream commit message: $commit_message"
+          
+          {
+            echo "COMMIT_MESSAGE<<EOF"
+            echo "$commit_message"
+            echo "EOF"
+          } >> $GITHUB_ENV
+          echo "COMMIT_SHA=$commit_sha" >> $GITHUB_ENV
+
+      # 步骤 3: 检查这个最新提交是否已经被我们构建过
+      - name: Check if commit has already been built
+        id: check_build_status
+        run: |
+          if [ ! -f LAST_BUILT_SHA ]; then
+            echo "LAST_BUILT_SHA file not found, creating empty file"
+            touch LAST_BUILT_SHA
+          fi
+          
+          last_built_sha=$(cat LAST_BUILT_SHA || echo "")
+          current_sha="${{ env.COMMIT_SHA }}"
+          
+          echo "Last built SHA: $last_built_sha"
+          echo "Current SHA: $current_sha"
+          
+          if [ "$last_built_sha" == "$current_sha" ]; then
+            echo "Latest upstream commit ($current_sha) has already been built. Exiting."
+            echo "should_build=false" >> $GITHUB_OUTPUT
+          else
+            echo "New upstream commit ($current_sha) found. Proceeding to check message."
+            echo "should_build=true" >> $GITHUB_OUTPUT
+          fi
+
+      # 步骤 4: 使用更灵活的正则表达式解析提交信息
+      - name: Parse commit message for release version
+        id: parse_version
+        if: steps.check_build_status.outputs.should_build == 'true'
+        run: |
+          echo "Checking commit message for release version..."
+          echo "Commit message: ${{ env.COMMIT_MESSAGE }}"
+          
+          if [[ "${{ env.COMMIT_MESSAGE }}" =~ (release[[:space:]]+)?(v[0-9]+\.[0-9]+\.[0-9]+) ]]; then
+            echo "Release commit found in message."
+            version=${BASH_REMATCH[2]}
+            
+            echo "is_release=true" >> $GITHUB_OUTPUT
+            echo "IMAGE_TAG=${version}" >> $GITHUB_OUTPUT
+            echo "New image tag will be: ${version}"
+          else
+            echo "Commit message does not contain a release tag pattern. Skipping build."
+            echo "is_release=false" >> $GITHUB_OUTPUT
+          fi
+
+      # 步骤 5: 提前登录 Docker Hub (用于后续的镜像检查和构建)
+      - name: Log in to Docker Hub
+        if: steps.parse_version.outputs.is_release == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # 步骤 6: 检查 Docker 镜像是否已存在，避免重复构建
+      - name: Check if Docker image already exists
+        id: check_image
+        if: steps.parse_version.outputs.is_release == 'true'
+        run: |
+          IMAGE_TAG="${{ steps.parse_version.outputs.IMAGE_TAG }}"
+          REPO="${{ secrets.DOCKERHUB_USERNAME }}/ccr"
+          
+          if docker manifest inspect "${REPO}:${IMAGE_TAG}" >/dev/null 2>&1; then
+            echo "Image ${REPO}:${IMAGE_TAG} already exists. Skipping build."
+            echo "image_exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "Image ${REPO}:${IMAGE_TAG} does not exist. Proceeding with build."
+            echo "image_exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      # 步骤 7: 设置 Docker Buildx
+      - name: Set up Docker Buildx
+        if: steps.parse_version.outputs.is_release == 'true' && steps.check_image.outputs.image_exists == 'false'
+        uses: docker/setup-buildx-action@v3
+
+      # 步骤 8: 构建并推送 Docker 镜像，并使用缓存
+      - name: Build and push Docker image
+        if: steps.parse_version.outputs.is_release == 'true' && steps.check_image.outputs.image_exists == 'false'
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/ccr:${{ steps.parse_version.outputs.IMAGE_TAG }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/ccr:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # 步骤 9: 更新 LAST_BUILT_SHA 文件
+      - name: Update last built SHA
+        if: success() && steps.parse_version.outputs.is_release == 'true' && steps.check_image.outputs.image_exists == 'false'
+        run: |
+          echo "Updating LAST_BUILT_SHA to ${{ env.COMMIT_SHA }}"
+          echo "${{ env.COMMIT_SHA }}" > LAST_BUILT_SHA
+          
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          
+          git add LAST_BUILT_SHA
+          if git diff --staged --quiet; then
+            echo "No changes in LAST_BUILT_SHA to commit."
+          else
+            git commit -m "chore: Update last built SHA to ${{ env.COMMIT_SHA }}"
+            git push
+          fi
+
+      # 步骤 10: 输出构建摘要，方便快速查看
+      - name: Build summary
+        if: always()
+        run: |
+          echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **Upstream Commit SHA**: ${{ env.COMMIT_SHA }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Should Build**: ${{ steps.check_build_status.outputs.should_build }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Is Release**: ${{ steps.parse_version.outputs.is_release }}" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.parse_version.outputs.is_release }}" == "true" ]; then
+            echo "- **Image Tag**: ${{ steps.parse_version.outputs.IMAGE_TAG }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **Image Exists**: ${{ steps.check_image.outputs.image_exists }}" >> $GITHUB_STEP_SUMMARY
+          fi
+
