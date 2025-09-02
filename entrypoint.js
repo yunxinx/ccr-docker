@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 
 const { spawn } = require('child_process');
-const { existsSync, mkdirSync, readdirSync, statSync, readFileSync, createReadStream } = require('fs');
+const { existsSync, mkdirSync, readdirSync, statSync, readFileSync, createReadStream, unlinkSync } = require('fs');  // 新增unlinkSync导入
 const path = require('path');
 
 // --- 配置定义 ---
 const CONFIG_FILE = "/root/.claude-code-router/config.json";
 const LOGS_DIR = "/root/.claude-code-router/logs";
 const CCR_CLI_PATH = "/app/node_modules/@musistudio/claude-code-router/dist/cli.js";
+const PID_FILE = "/root/.claude-code-router/.claude-code-router.pid";  // 新增PID文件路径定义
 
 // --- 优雅退出处理 ---
 let ccrProcess = null;
@@ -68,6 +69,21 @@ function checkEnvironment() {
     } catch (err) {
         console.error(`错误：无法创建日志目录: ${err.message}`); 
         process.exit(1);
+    }
+}
+
+// --- 删除PID文件 ---
+function deletePidFile() {
+    if (existsSync(PID_FILE)) {
+        try {
+            unlinkSync(PID_FILE);
+            console.log(`--> 已删除旧的PID文件: ${PID_FILE}`);
+        } catch (err) {
+            console.warn(`--> 警告：删除PID文件失败: ${err.message}`);
+            // 这里不退出，因为PID文件删除失败不应该阻止服务启动
+        }
+    } else {
+        console.log(`--> 未找到PID文件: ${PID_FILE}，无需删除`);
     }
 }
 
@@ -205,6 +221,9 @@ function startCCR() {
     console.log('--> Service is starting...');
     console.log(`--> 日志将保存在 ${LOGS_DIR} 目录。`);
     console.log(`--> 建议挂载日志目录进行持久化: -v /path/to/your/logs:${LOGS_DIR}`);
+    
+    // 在启动服务前删除PID文件
+    deletePidFile();
     
     if (process.env.STREAM_LOG_FILE === 'true') {
         startWithLogStreaming();
