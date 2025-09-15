@@ -2,7 +2,7 @@ name: Build and Push CCR Docker Image on Upstream Release
 
 on:
   schedule:
-    - cron: '0 */3 * * *'
+    - cron: '0 8 * * 0'
   workflow_dispatch:
     inputs:
       force_rebuild_version:
