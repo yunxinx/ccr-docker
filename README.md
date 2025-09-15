@@ -2,9 +2,11 @@
 
 > 2025年08月16日修复：Docker 镜像构建中的版本重复问题。之前由于 package.json 中使用 "latest" 标签，Docker 构建时会复用缓存中的旧版本依赖，导致不同版本标签实际指向同一个镜像。现在工作流会在构建前动态更新 package.json，将 "latest" 替换为具体的版本号（如"1.0.38"），确保每次构建都使用正确的上游版本。同时禁用了Docker构建缓存，保证每个版本都是独立构建的真实镜像。
 >
-> 修改对上游的检查时间从 1 小时一次到 3 小时一次
+> ~~修改对上游的检查时间从 1 小时一次到 3 小时一次~~
+>
+> 2025年09月15日更改：因为 CCR 更新已经稳定，因此修改构建时间为每周日早上 8 点一次，避免使用 Action 过多导致意外的后果
 
-这是一个为 `musistudio/claude-code-router` 项目提供的非官方 Docker 镜像。
+这是一个为 [`musistudio/claude-code-router`](https://github.com/musistudio/claude-code-router) 项目提供的非官方 Docker 镜像。
 
 默认是每 3 小时检查一次上游提交情况，如果上游的提交包含了类似 "release v1.0.36" 或者 "v1.0.36" 这两种格式的提交的话，就会触发 Action 构建镜像。
 
